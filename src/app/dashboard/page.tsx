@@ -1,104 +1,74 @@
-import { getUserWorkouts } from "@/data/user-workouts";
-import { format } from "date-fns";
-import { CalendarClient } from "./calendar-client";
-import { Button } from "@/components/ui/button";
-import { Suspense } from "react";
-import Link from "next/link";
+export const dynamic = "force-dynamic"
 
-interface DashboardPageProps {
-  searchParams: Promise<{ date?: string }>;
+import { auth } from "@clerk/nextjs/server"
+import { redirect } from "next/navigation"
+import { format } from "date-fns"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { getWorkoutsForDate } from "@/data/workouts"
+import DatePicker from "./DatePicker"
+
+type Props = {
+  searchParams: Promise<{ date?: string }>
 }
 
-export default async function DashboardPage({
-  searchParams,
-}: DashboardPageProps) {
-  const params = await searchParams;
-  return (
-    <div className="container mx-auto p-6 max-w-4xl">
-      <h1 className="text-3xl font-bold mb-8">Workout Dashboard</h1>
-      <Suspense fallback={<div>Loading...</div>}>
-        <DashboardContent searchParams={params} />
-      </Suspense>
-    </div>
-  );
+function todayString() {
+  return format(new Date(), "yyyy-MM-dd")
 }
 
-async function DashboardContent({
-  searchParams,
-}: {
-  searchParams: { date?: string };
-}) {
-  const formatDateWithOrdinal = (date: Date) => {
-    return format(date, "do MMM yyyy");
-  };
+export default async function DashboardPage({ searchParams }: Props) {
+  const { userId } = await auth()
+  if (!userId) redirect("/sign-in")
 
-  const parseDateFromString = (dateString: string): Date => {
-    const [year, month, day] = dateString.split("-").map(Number);
-    return new Date(year, month - 1, day);
-  };
+  const { date = todayString() } = await searchParams
 
-  const selectedDate = searchParams.date
-    ? parseDateFromString(searchParams.date)
-    : new Date();
-  const workouts = await getUserWorkouts(selectedDate);
+  const workoutList = await getWorkoutsForDate(userId, new Date(date + "T00:00:00"))
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">
-          Workouts for {formatDateWithOrdinal(selectedDate)}
-        </h2>
-        <div className="flex items-center gap-2">
-          <Link href="/dashboard/workout/new">
-            <Button>Log New Workout</Button>
-          </Link>
-          <CalendarClient />
-        </div>
+    <div className="mx-auto max-w-2xl px-4 py-8">
+      <div className="mb-6 flex items-center gap-4">
+        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <DatePicker value={date} />
       </div>
 
-      <div className="space-y-4">
-        {workouts.length > 0 ? (
-          workouts.map((workout) => (
-            <Link
-              key={workout.id}
-              href={`/dashboard/workout/${workout.id}`}
-              className="block border rounded-lg p-4 hover:shadow-md transition-shadow"
-            >
-              <div className="flex justify-between items-start mb-2">
-                <h3 className="font-semibold text-lg">{workout.name}</h3>
-                <span className="text-sm text-muted-foreground">
-                  {format(workout.startedAt, "h:mm a")}
+      {workoutList.length === 0 ? (
+        <p className="text-muted-foreground">No workouts logged for this date.</p>
+      ) : (
+        <div className="space-y-4">
+          {workoutList.map((workout) => (
+            <Card key={workout.id}>
+              <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-2">
+                <CardTitle className="text-base font-medium">
+                  {workout.name ?? "Unnamed Workout"}
+                </CardTitle>
+                <span
+                  className={
+                    workout.completedAt
+                      ? "rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground"
+                      : "rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
+                  }
+                >
+                  {workout.completedAt ? "Completed" : "In progress"}
                 </span>
-              </div>
-
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-muted-foreground">
-                    {workout.completedAt ? "Completed" : "In Progress"}
-                  </span>
-                  {workout.completedAt && (
-                    <span className="text-sm text-muted-foreground">
-                      • Duration:{" "}
-                      {Math.round(
-                        (new Date(workout.completedAt).getTime() -
-                          new Date(workout.startedAt).getTime()) /
-                          (1000 * 60)
-                      )}{" "}
-                      min
-                    </span>
-                  )}
-                </div>
-              </div>
-            </Link>
-          ))
-        ) : (
-          <div className="border rounded-lg p-8 text-center">
-            <p className="text-muted-foreground">
-              No workouts logged for this date
-            </p>
-          </div>
-        )}
-      </div>
+              </CardHeader>
+              <CardContent>
+                <p className="mb-3 text-sm text-muted-foreground">
+                  {format(workout.startedAt, "h:mm a")}
+                  {workout.completedAt && ` — ${format(workout.completedAt, "h:mm a")}`}
+                </p>
+                {workout.exercises.length > 0 && (
+                  <ul className="space-y-1">
+                    {workout.exercises.map((name) => (
+                      <li key={name} className="text-sm">
+                        {name}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
-  );
+  )
 }

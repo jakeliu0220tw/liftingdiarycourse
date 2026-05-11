@@ -1,82 +1,125 @@
-# Data Fetching Guidelines
+# Data Fetching Standards
 
-## Core Principle: Server Components Only
+## Rule: server components only
 
-**CRITICAL**: ALL data fetching within this application MUST be done via Server Components. This is a fundamental architectural requirement.
+**ALL data fetching must happen inside async Server Components. No exceptions.**
 
-### ✅ Allowed Data Fetching Methods
-- **Server Components** - The ONLY approved method for data fetching
+Data must never be fetched via:
+- Route handlers (`src/app/api/`)
+- Client Components (`"use client"`)
+- `useEffect` + `fetch`
+- SWR, React Query, or any client-side data library
+- Any other mechanism not listed as allowed above
 
-### ❌ Prohibited Data Fetching Methods
-- Route handlers (API routes)
-- Client components
-- Client-side fetching (useEffect, SWR, React Query, etc.)
-- Any other method not explicitly listed as allowed
+If a component needs data, it must either be a Server Component itself, or receive the data as a prop passed down from a parent Server Component.
 
-## Database Query Requirements
+## Rule: all queries go through `/data` helpers
 
-### Helper Functions in /data Directory
-All database queries MUST be implemented as helper functions within the `/data` directory.
+**Database queries must never be written inline inside a page or layout. Every query must live in a dedicated helper function inside the `src/data/` directory.**
 
-### Drizzle ORM Required
-- **MUST** use Drizzle ORM for all database queries
-- **NEVER** use raw SQL queries
-- Follow Drizzle's type-safe query patterns
+Helper functions in `src/data/` are the only place Drizzle ORM queries are written. Pages and layouts call these helpers — they do not construct queries themselves.
 
-### Data Access Security
-**CRITICAL SECURITY REQUIREMENT**:
+```
+src/
+  data/
+    workouts.ts     ← query helpers for the workouts table
+    exercises.ts    ← query helpers for the exercises table
+    sets.ts         ← query helpers for the sets table
+  app/
+    dashboard/
+      page.tsx      ← calls helpers from src/data/, never queries directly
+```
 
-A logged-in user can ONLY access their own data. They MUST NOT be able to access any other user's data.
+## Rule: use Drizzle ORM — never raw SQL
 
-- Always filter queries by the current user's ID
-- Implement proper authorization checks in all data helper functions
-- Validate user ownership before returning any data
-- Never return data that doesn't belong to the authenticated user
+**All database access must use the Drizzle ORM client from `@/db`. Raw SQL strings are not permitted.**
 
-## Implementation Pattern
+```ts
+// ALLOWED — Drizzle query builder
+import { db } from "@/db"
+import { workouts } from "@/db/schema"
+import { eq, and, gte, lt } from "drizzle-orm"
 
-```typescript
-// Example: /data/user-workouts.ts
-import { db } from '@/db'
-import { workouts } from '@/db/schema'
-import { eq, and } from 'drizzle-orm'
-import { auth } from '@/lib/auth' // or your auth solution
+const rows = await db
+  .select()
+  .from(workouts)
+  .where(eq(workouts.userId, userId))
 
-export async function getUserWorkouts() {
-  const session = await auth()
-  if (!session?.user?.id) {
-    throw new Error('Unauthorized')
-  }
+// NOT ALLOWED — raw SQL
+await db.execute(sql`SELECT * FROM workouts WHERE user_id = ${userId}`)
+```
 
-  return await db
+## Rule: every query must be scoped to the authenticated user
+
+**This is a hard security requirement. A logged-in user must only ever be able to read or write their own data.**
+
+Every helper function in `src/data/` that touches user-owned tables (`workouts`, `workout_exercises`, `sets`) must:
+
+1. Accept `userId` as an explicit parameter — never read it from a global or infer it inside the helper
+2. Include `eq(table.userId, userId)` (or an equivalent join condition) in every `WHERE` clause
+3. Never return rows belonging to a different user
+
+The caller (the Server Component) is responsible for obtaining the authenticated `userId` from Clerk and passing it to the helper.
+
+```ts
+// src/data/workouts.ts
+import { db } from "@/db"
+import { workouts, workoutExercises, exercises } from "@/db/schema"
+import { and, eq, gte, lt } from "drizzle-orm"
+
+export async function getWorkoutsForDate(userId: string, date: Date) {
+  const start = new Date(date)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(date)
+  end.setHours(23, 59, 59, 999)
+
+  return db
     .select()
     .from(workouts)
-    .where(eq(workouts.userId, session.user.id))
+    .where(
+      and(
+        eq(workouts.userId, userId),   // ← user scope — never omit this
+        gte(workouts.startedAt, start),
+        lt(workouts.startedAt, end),
+      ),
+    )
+    .orderBy(workouts.startedAt)
 }
 ```
 
-```typescript
-// Example: Server Component usage
-// /src/app/workouts/page.tsx
-import { getUserWorkouts } from '@/data/user-workouts'
+```ts
+// src/app/dashboard/page.tsx
+import { auth } from "@clerk/nextjs/server"
+import { redirect } from "next/navigation"
+import { getWorkoutsForDate } from "@/data/workouts"
 
-export default async function WorkoutsPage() {
-  const workouts = await getUserWorkouts()
+export default async function DashboardPage() {
+  const { userId } = await auth()
+  if (!userId) redirect("/sign-in")
 
-  return (
-    <div>
-      {workouts.map(workout => (
-        <div key={workout.id}>{workout.name}</div>
-      ))}
-    </div>
-  )
+  const workoutList = await getWorkoutsForDate(userId, new Date())
+
+  // render workoutList with shadcn components...
 }
 ```
 
-## Why This Approach?
+## What belongs where
 
-1. **Security**: Server-side data fetching with proper authorization
-2. **Performance**: No client-side data fetching waterfalls
-3. **SEO**: Fully server-rendered content
-4. **Type Safety**: Drizzle ORM provides full TypeScript support
-5. **Consistency**: Single pattern for all data access
+| Concern | Location |
+|---|---|
+| Drizzle query logic | `src/data/<table>.ts` |
+| Auth check + `userId` retrieval | Server Component (`page.tsx` / `layout.tsx`) |
+| Rendering data | Server Component, passing props to Client Components as needed |
+| Mutations (writes) | Server Actions defined in `src/data/` or co-located `actions.ts` files — still no route handlers |
+
+## Enforcement checklist
+
+Before committing any data-related code, verify:
+
+- [ ] Data is fetched inside an async Server Component, not a Client Component
+- [ ] No `fetch()`, `useEffect`, SWR, or React Query used for database data
+- [ ] No route handlers created under `src/app/api/` for internal data access
+- [ ] All queries live in helper functions inside `src/data/`
+- [ ] All queries use the Drizzle query builder — no raw SQL
+- [ ] Every query on a user-owned table includes `eq(table.userId, userId)` in the `WHERE` clause
+- [ ] `userId` is sourced from Clerk's `auth()` in the Server Component and passed explicitly to the helper
